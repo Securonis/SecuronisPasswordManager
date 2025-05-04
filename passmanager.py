@@ -9,21 +9,28 @@ from cryptography.fernet import Fernet
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QLabel, QPushButton, QLineEdit,
                            QTextEdit, QMessageBox, QFileDialog, QSpinBox,
-                           QFrame, QGridLayout, QScrollArea)
+                           QFrame, QGridLayout, QScrollArea, QComboBox)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QPalette, QColor, QPixmap
 
 class PasswordManager:
     def __init__(self, file_path=None):
         if file_path is None:
-            file_path = '/etc/secure_passwords/passwords.json'
+            file_path = os.path.expanduser('~/.passmanager/passwords.json')
         self.file_path = file_path
         self.key = self.load_key()
         self.fernet = Fernet(self.key)
         self.passwords = self.load_passwords()
+        # Default categories
+        self.categories = ["1", "2", "3", "4"]
+        if "categories" not in self.passwords:
+            self.passwords["categories"] = {}
+            for category in self.categories:
+                self.passwords["categories"][category] = {}
+            self.save_passwords()
 
     def load_key(self):
-        key_path = '/etc/secure_passwords/secret.key'
+        key_path = os.path.expanduser('~/.passmanager/secret.key')
         os.makedirs(os.path.dirname(key_path), exist_ok=True)
         if os.path.exists(key_path):
             with open(key_path, 'rb') as key_file:
@@ -49,32 +56,70 @@ class PasswordManager:
         with open(self.file_path, 'wb') as file:
             file.write(encrypted_data)
 
-    def add_password(self, service, username, password):
-        self.passwords[service] = {'username': username, 'password': password}
+    def add_password(self, service, username, password, category="1"):
+        if category not in self.passwords["categories"]:
+            self.passwords["categories"][category] = {}
+        self.passwords["categories"][category][service] = {'username': username, 'password': password}
         self.save_passwords()
 
-    def get_password(self, service):
-        if service in self.passwords:
-            return self.passwords[service]
+    def get_password(self, service, category=None):
+        if category:
+            if category in self.passwords["categories"] and service in self.passwords["categories"][category]:
+                return self.passwords["categories"][category][service]
+        else:
+            # Search in all categories
+            for cat, services in self.passwords["categories"].items():
+                if service in services:
+                    return services[service]
         return None
 
-    def update_password(self, service, username, password):
-        if service in self.passwords:
-            self.passwords[service] = {'username': username, 'password': password}
-            self.save_passwords()
-            return True
+    def update_password(self, service, username, password, category=None):
+        if category:
+            if category in self.passwords["categories"] and service in self.passwords["categories"][category]:
+                self.passwords["categories"][category][service] = {'username': username, 'password': password}
+                self.save_passwords()
+                return True
+        else:
+            # Search and update in all categories
+            for cat, services in self.passwords["categories"].items():
+                if service in services:
+                    services[service] = {'username': username, 'password': password}
+                    self.save_passwords()
+                    return True
         return False
 
-    def delete_password(self, service):
-        if service in self.passwords:
-            del self.passwords[service]
-            self.save_passwords()
-            return True
+    def delete_password(self, service, category=None):
+        if category:
+            if category in self.passwords["categories"] and service in self.passwords["categories"][category]:
+                del self.passwords["categories"][category][service]
+                self.save_passwords()
+                return True
+        else:
+            # Search and delete in all categories
+            for cat, services in self.passwords["categories"].items():
+                if service in services:
+                    del services[service]
+                    self.save_passwords()
+                    return True
         return False
 
-    def search_password(self, keyword):
-        return {service: creds for service, creds in self.passwords.items() 
-                if keyword.lower() in service.lower()}
+    def search_password(self, keyword, category=None):
+        results = {}
+        if category:
+            if category in self.passwords["categories"]:
+                cat_services = self.passwords["categories"][category]
+                results.update({service: creds for service, creds in cat_services.items() 
+                              if keyword.lower() in service.lower()})
+        else:
+            # Search in all categories
+            for cat, services in self.passwords["categories"].items():
+                cat_results = {service: creds for service, creds in services.items() 
+                              if keyword.lower() in service.lower()}
+                results.update(cat_results)
+        return results
+
+    def get_categories(self):
+        return list(self.passwords["categories"].keys())
 
     def import_passwords(self, csv_file):
         try:
@@ -84,7 +129,8 @@ class PasswordManager:
                     service = row['service']
                     username = row['username']
                     password = row['password']
-                    self.add_password(service, username, password)
+                    category = row.get('category', '1')  # Default to category 1 if not specified
+                    self.add_password(service, username, password, category)
             return True
         except Exception as e:
             print(f"Error importing passwords: {e}")
@@ -93,11 +139,17 @@ class PasswordManager:
     def export_passwords(self, csv_file):
         try:
             with open(csv_file, 'w', newline='') as file:
-                fieldnames = ['service', 'username', 'password']
+                fieldnames = ['category', 'service', 'username', 'password']
                 writer = csv.DictWriter(file, fieldnames=fieldnames)
                 writer.writeheader()
-                for service, creds in self.passwords.items():
-                    writer.writerow({'service': service, 'username': creds['username'], 'password': creds['password']})
+                for category, services in self.passwords["categories"].items():
+                    for service, creds in services.items():
+                        writer.writerow({
+                            'category': category,
+                            'service': service, 
+                            'username': creds['username'], 
+                            'password': creds['password']
+                        })
             return True
         except Exception as e:
             print(f"Error exporting passwords: {e}")
@@ -150,6 +202,11 @@ class PasswordManagerGUI(QMainWindow):
         second_row.setContentsMargins(0, 0, 0, 0)
         
 
+        third_row = QHBoxLayout()
+        third_row.setSpacing(2)
+        third_row.setContentsMargins(0, 0, 0, 0)
+        
+
         button_style = """
             QPushButton {
                 background-color: #2d2d2d;
@@ -184,7 +241,8 @@ class PasswordManagerGUI(QMainWindow):
             ("Search Passwords", self.show_search_password),
             ("Import CSV", self.import_passwords),
             ("Export CSV", self.export_passwords),
-            ("Generate Password", self.show_generate_password)
+            ("Generate Password", self.show_generate_password),
+            ("Show All Passwords", self.show_all_passwords)
         ]
 
         for text, callback in menu_buttons[:4]:
@@ -195,15 +253,23 @@ class PasswordManagerGUI(QMainWindow):
             first_row.addWidget(btn)
         
 
-        for text, callback in menu_buttons[4:]:
+        for text, callback in menu_buttons[4:8]:
             btn = QPushButton(text)
             btn.setStyleSheet(button_style)
             btn.setCursor(Qt.PointingHandCursor)
             btn.clicked.connect(callback)
             second_row.addWidget(btn)
+            
+        # Add Show All Passwords button in the third row
+        show_all_btn = QPushButton(menu_buttons[8][0])
+        show_all_btn.setStyleSheet(button_style)
+        show_all_btn.setCursor(Qt.PointingHandCursor)
+        show_all_btn.clicked.connect(menu_buttons[8][1])
+        third_row.addWidget(show_all_btn)
         
         top_layout.addLayout(first_row)
         top_layout.addLayout(second_row)
+        top_layout.addLayout(third_row)
         main_layout.addWidget(top_panel)
 
         self.output_text = QTextEdit()
@@ -259,7 +325,7 @@ class PasswordManagerGUI(QMainWindow):
     def show_add_password(self):
         dialog = QWidget()
         dialog.setWindowTitle("Add Password")
-        dialog.setGeometry(200, 200, 400, 250)
+        dialog.setGeometry(200, 200, 400, 280)
         dialog.setStyleSheet("""
             QWidget {
                 background-color: #1a1a1a;
@@ -268,7 +334,7 @@ class PasswordManagerGUI(QMainWindow):
                 color: white;
                 font-size: 12px;
             }
-            QLineEdit {
+            QLineEdit, QComboBox {
                 background-color: #2d2d2d;
                 color: white;
                 border: 1px solid #3d3d3d;
@@ -276,7 +342,7 @@ class PasswordManagerGUI(QMainWindow):
                 padding: 6px;
                 font-size: 12px;
             }
-            QLineEdit:focus {
+            QLineEdit:focus, QComboBox:focus {
                 border: 1px solid #42d4d4;
             }
             QPushButton {
@@ -293,10 +359,29 @@ class PasswordManagerGUI(QMainWindow):
                 border: 1px solid #42d4d4;
                 color: #42d4d4;
             }
+            QComboBox::drop-down {
+                border: 0px;
+            }
+            QComboBox::down-arrow {
+                image: url(down_arrow.png);
+                width: 12px;
+                height: 12px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: white;
+                selection-background-color: #3d3d3d;
+                selection-color: #42d4d4;
+            }
         """)
         layout = QVBoxLayout(dialog)
         layout.setSpacing(10)
         layout.setContentsMargins(15, 15, 15, 15)
+
+        category_label = QLabel("Category:")
+        category_combo = QComboBox()
+        for category in self.password_manager.get_categories():
+            category_combo.addItem(category)
         
         service_label = QLabel("Service Name:")
         service_input = QLineEdit()
@@ -311,6 +396,8 @@ class PasswordManagerGUI(QMainWindow):
         password_input.setPlaceholderText("Enter password")
         password_input.setEchoMode(QLineEdit.Password)
         
+        layout.addWidget(category_label)
+        layout.addWidget(category_combo)
         layout.addWidget(service_label)
         layout.addWidget(service_input)
         layout.addWidget(username_label)
@@ -326,6 +413,7 @@ class PasswordManagerGUI(QMainWindow):
             service_input.text(),
             username_input.text(),
             password_input.text(),
+            category_combo.currentText(),
             dialog
         ))
         cancel_btn.clicked.connect(dialog.close)
@@ -336,19 +424,19 @@ class PasswordManagerGUI(QMainWindow):
         
         dialog.show()
         
-    def add_password(self, service, username, password, dialog):
+    def add_password(self, service, username, password, category, dialog):
         if not all([service, username, password]):
             QMessageBox.warning(dialog, "Error", "Please fill all fields!")
             return
             
-        self.password_manager.add_password(service, username, password)
-        self.output_text.setText(f"Password added for service: {service}")
+        self.password_manager.add_password(service, username, password, category)
+        self.output_text.setText(f"Password added for service: {service} (Category: {category})")
         dialog.close()
         
     def show_get_password(self):
         dialog = QWidget()
         dialog.setWindowTitle("Get Password")
-        dialog.setGeometry(200, 200, 300, 80)
+        dialog.setGeometry(200, 200, 300, 140)
         dialog.setStyleSheet("""
             QWidget {
                 background-color: #1a1a1a;
@@ -357,7 +445,7 @@ class PasswordManagerGUI(QMainWindow):
                 color: white;
                 font-size: 11px;
             }
-            QLineEdit {
+            QLineEdit, QComboBox {
                 background-color: #2d2d2d;
                 color: white;
                 border: 1px solid #3d3d3d;
@@ -365,7 +453,7 @@ class PasswordManagerGUI(QMainWindow):
                 padding: 4px;
                 font-size: 11px;
             }
-            QLineEdit:focus {
+            QLineEdit:focus, QComboBox:focus {
                 border: 1px solid #42d4d4;
             }
             QPushButton {
@@ -382,15 +470,32 @@ class PasswordManagerGUI(QMainWindow):
                 border: 1px solid #42d4d4;
                 color: #42d4d4;
             }
+            QComboBox::drop-down {
+                border: 0px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: white;
+                selection-background-color: #3d3d3d;
+                selection-color: #42d4d4;
+            }
         """)
         layout = QVBoxLayout(dialog)
         layout.setSpacing(5)
         layout.setContentsMargins(10, 10, 10, 10)
         
+        category_label = QLabel("Category (optional):")
+        category_combo = QComboBox()
+        category_combo.addItem("All Categories")
+        for category in self.password_manager.get_categories():
+            category_combo.addItem(category)
+        
         service_label = QLabel("Service Name:")
         service_input = QLineEdit()
         service_input.setPlaceholderText("Enter service name")
         
+        layout.addWidget(category_label)
+        layout.addWidget(category_combo)
         layout.addWidget(service_label)
         layout.addWidget(service_input)
         
@@ -398,7 +503,11 @@ class PasswordManagerGUI(QMainWindow):
         get_btn = QPushButton("Get")
         cancel_btn = QPushButton("Cancel")
         
-        get_btn.clicked.connect(lambda: self.get_password(service_input.text(), dialog))
+        get_btn.clicked.connect(lambda: self.get_password(
+            service_input.text(), 
+            None if category_combo.currentText() == "All Categories" else category_combo.currentText(),
+            dialog
+        ))
         cancel_btn.clicked.connect(dialog.close)
         
         button_layout.addWidget(get_btn)
@@ -407,14 +516,14 @@ class PasswordManagerGUI(QMainWindow):
         
         dialog.show()
         
-    def get_password(self, service, dialog):
+    def get_password(self, service, category, dialog):
         if not service:
             QMessageBox.warning(dialog, "Error", "Please enter service name!")
             return
             
-        if service in self.password_manager.passwords:
-            creds = self.password_manager.passwords[service]
-            self.output_text.setText(f"Service: {service}\nUsername: {creds['username']}\nPassword: {creds['password']}")
+        password_info = self.password_manager.get_password(service, category)
+        if password_info:
+            self.output_text.setText(f"Service: {service}\nUsername: {password_info['username']}\nPassword: {password_info['password']}")
         else:
             self.output_text.setText("Service not found.")
         dialog.close()
@@ -422,7 +531,7 @@ class PasswordManagerGUI(QMainWindow):
     def show_update_password(self):
         dialog = QWidget()
         dialog.setWindowTitle("Update Password")
-        dialog.setGeometry(200, 200, 300, 180)
+        dialog.setGeometry(200, 200, 300, 240)
         dialog.setStyleSheet("""
             QWidget {
                 background-color: #1a1a1a;
@@ -431,7 +540,7 @@ class PasswordManagerGUI(QMainWindow):
                 color: white;
                 font-size: 11px;
             }
-            QLineEdit {
+            QLineEdit, QComboBox {
                 background-color: #2d2d2d;
                 color: white;
                 border: 1px solid #3d3d3d;
@@ -439,7 +548,7 @@ class PasswordManagerGUI(QMainWindow):
                 padding: 4px;
                 font-size: 11px;
             }
-            QLineEdit:focus {
+            QLineEdit:focus, QComboBox:focus {
                 border: 1px solid #42d4d4;
             }
             QPushButton {
@@ -456,10 +565,25 @@ class PasswordManagerGUI(QMainWindow):
                 border: 1px solid #42d4d4;
                 color: #42d4d4;
             }
+            QComboBox::drop-down {
+                border: 0px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: white;
+                selection-background-color: #3d3d3d;
+                selection-color: #42d4d4;
+            }
         """)
         layout = QVBoxLayout(dialog)
         layout.setSpacing(5)
         layout.setContentsMargins(10, 10, 10, 10)
+        
+        category_label = QLabel("Category (optional):")
+        category_combo = QComboBox()
+        category_combo.addItem("All Categories")
+        for category in self.password_manager.get_categories():
+            category_combo.addItem(category)
         
         service_label = QLabel("Service Name:")
         service_input = QLineEdit()
@@ -474,6 +598,8 @@ class PasswordManagerGUI(QMainWindow):
         password_input.setPlaceholderText("Enter new password")
         password_input.setEchoMode(QLineEdit.Password)
         
+        layout.addWidget(category_label)
+        layout.addWidget(category_combo)
         layout.addWidget(service_label)
         layout.addWidget(service_input)
         layout.addWidget(username_label)
@@ -489,6 +615,7 @@ class PasswordManagerGUI(QMainWindow):
             service_input.text(),
             username_input.text(),
             password_input.text(),
+            None if category_combo.currentText() == "All Categories" else category_combo.currentText(),
             dialog
         ))
         cancel_btn.clicked.connect(dialog.close)
@@ -499,13 +626,12 @@ class PasswordManagerGUI(QMainWindow):
         
         dialog.show()
         
-    def update_password(self, service, username, password, dialog):
+    def update_password(self, service, username, password, category, dialog):
         if not all([service, username, password]):
             QMessageBox.warning(dialog, "Error", "Please fill all fields!")
             return
             
-        if service in self.password_manager.passwords:
-            self.password_manager.update_password(service, username, password)
+        if self.password_manager.update_password(service, username, password, category):
             self.output_text.setText(f"Password updated for service: {service}")
         else:
             self.output_text.setText("Service not found.")
@@ -514,7 +640,7 @@ class PasswordManagerGUI(QMainWindow):
     def show_delete_password(self):
         dialog = QWidget()
         dialog.setWindowTitle("Delete Password")
-        dialog.setGeometry(200, 200, 300, 80)
+        dialog.setGeometry(200, 200, 300, 140)
         dialog.setStyleSheet("""
             QWidget {
                 background-color: #1a1a1a;
@@ -523,7 +649,7 @@ class PasswordManagerGUI(QMainWindow):
                 color: white;
                 font-size: 11px;
             }
-            QLineEdit {
+            QLineEdit, QComboBox {
                 background-color: #2d2d2d;
                 color: white;
                 border: 1px solid #3d3d3d;
@@ -531,7 +657,7 @@ class PasswordManagerGUI(QMainWindow):
                 padding: 4px;
                 font-size: 11px;
             }
-            QLineEdit:focus {
+            QLineEdit:focus, QComboBox:focus {
                 border: 1px solid #42d4d4;
             }
             QPushButton {
@@ -548,15 +674,32 @@ class PasswordManagerGUI(QMainWindow):
                 border: 1px solid #42d4d4;
                 color: #42d4d4;
             }
+            QComboBox::drop-down {
+                border: 0px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: white;
+                selection-background-color: #3d3d3d;
+                selection-color: #42d4d4;
+            }
         """)
         layout = QVBoxLayout(dialog)
         layout.setSpacing(5)
         layout.setContentsMargins(10, 10, 10, 10)
         
+        category_label = QLabel("Category (optional):")
+        category_combo = QComboBox()
+        category_combo.addItem("All Categories")
+        for category in self.password_manager.get_categories():
+            category_combo.addItem(category)
+        
         service_label = QLabel("Service Name:")
         service_input = QLineEdit()
         service_input.setPlaceholderText("Enter service name")
         
+        layout.addWidget(category_label)
+        layout.addWidget(category_combo)
         layout.addWidget(service_label)
         layout.addWidget(service_input)
         
@@ -564,7 +707,11 @@ class PasswordManagerGUI(QMainWindow):
         delete_btn = QPushButton("Delete")
         cancel_btn = QPushButton("Cancel")
         
-        delete_btn.clicked.connect(lambda: self.delete_password(service_input.text(), dialog))
+        delete_btn.clicked.connect(lambda: self.delete_password(
+            service_input.text(), 
+            None if category_combo.currentText() == "All Categories" else category_combo.currentText(),
+            dialog
+        ))
         cancel_btn.clicked.connect(dialog.close)
         
         button_layout.addWidget(delete_btn)
@@ -573,13 +720,12 @@ class PasswordManagerGUI(QMainWindow):
         
         dialog.show()
         
-    def delete_password(self, service, dialog):
+    def delete_password(self, service, category, dialog):
         if not service:
             QMessageBox.warning(dialog, "Error", "Please enter service name!")
             return
             
-        if service in self.password_manager.passwords:
-            self.password_manager.delete_password(service)
+        if self.password_manager.delete_password(service, category):
             self.output_text.setText(f"Deleted password for service: {service}")
         else:
             self.output_text.setText("Service not found.")
@@ -588,7 +734,7 @@ class PasswordManagerGUI(QMainWindow):
     def show_search_password(self):
         dialog = QWidget()
         dialog.setWindowTitle("Search Passwords")
-        dialog.setGeometry(200, 200, 300, 80)
+        dialog.setGeometry(200, 200, 300, 140)
         dialog.setStyleSheet("""
             QWidget {
                 background-color: #1a1a1a;
@@ -597,7 +743,7 @@ class PasswordManagerGUI(QMainWindow):
                 color: white;
                 font-size: 11px;
             }
-            QLineEdit {
+            QLineEdit, QComboBox {
                 background-color: #2d2d2d;
                 color: white;
                 border: 1px solid #3d3d3d;
@@ -605,7 +751,7 @@ class PasswordManagerGUI(QMainWindow):
                 padding: 4px;
                 font-size: 11px;
             }
-            QLineEdit:focus {
+            QLineEdit:focus, QComboBox:focus {
                 border: 1px solid #42d4d4;
             }
             QPushButton {
@@ -622,15 +768,32 @@ class PasswordManagerGUI(QMainWindow):
                 border: 1px solid #42d4d4;
                 color: #42d4d4;
             }
+            QComboBox::drop-down {
+                border: 0px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: white;
+                selection-background-color: #3d3d3d;
+                selection-color: #42d4d4;
+            }
         """)
         layout = QVBoxLayout(dialog)
         layout.setSpacing(5)
         layout.setContentsMargins(10, 10, 10, 10)
         
+        category_label = QLabel("Category (optional):")
+        category_combo = QComboBox()
+        category_combo.addItem("All Categories")
+        for category in self.password_manager.get_categories():
+            category_combo.addItem(category)
+        
         keyword_label = QLabel("Search Keyword:")
         keyword_input = QLineEdit()
         keyword_input.setPlaceholderText("Enter keyword to search")
         
+        layout.addWidget(category_label)
+        layout.addWidget(category_combo)
         layout.addWidget(keyword_label)
         layout.addWidget(keyword_input)
         
@@ -638,7 +801,11 @@ class PasswordManagerGUI(QMainWindow):
         search_btn = QPushButton("Search")
         cancel_btn = QPushButton("Cancel")
         
-        search_btn.clicked.connect(lambda: self.search_password(keyword_input.text(), dialog))
+        search_btn.clicked.connect(lambda: self.search_password(
+            keyword_input.text(), 
+            None if category_combo.currentText() == "All Categories" else category_combo.currentText(),
+            dialog
+        ))
         cancel_btn.clicked.connect(dialog.close)
         
         button_layout.addWidget(search_btn)
@@ -647,13 +814,12 @@ class PasswordManagerGUI(QMainWindow):
         
         dialog.show()
         
-    def search_password(self, keyword, dialog):
+    def search_password(self, keyword, category, dialog):
         if not keyword:
             QMessageBox.warning(dialog, "Error", "Please enter a keyword!")
             return
             
-        results = {service: creds for service, creds in self.password_manager.passwords.items() 
-                  if keyword.lower() in service.lower()}
+        results = self.password_manager.search_password(keyword, category)
         
         if not results:
             self.output_text.setText("No matching services found.")
@@ -765,6 +931,28 @@ class PasswordManagerGUI(QMainWindow):
         layout.addLayout(button_layout)
         
         dialog.show()
+
+    def show_all_passwords(self):
+        output = "All Passwords by Category:\n\n"
+        
+        for category in self.password_manager.get_categories():
+            category_passwords = self.password_manager.passwords["categories"][category]
+            if category_passwords:
+                output += f"Category: {category}\n"
+                output += "-" * 40 + "\n"
+                
+                for service, creds in category_passwords.items():
+                    output += f"Service: {service}\n"
+                    output += f"Username: {creds['username']}\n"
+                    output += f"Password: {creds['password']}\n"
+                    output += "-" * 30 + "\n"
+                
+                output += "\n"
+        
+        if output == "All Passwords by Category:\n\n":
+            output += "No passwords stored."
+        
+        self.output_text.setText(output)
 
 def main():
     app = QApplication(sys.argv)
