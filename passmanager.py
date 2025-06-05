@@ -9,9 +9,11 @@ from cryptography.fernet import Fernet
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QLabel, QPushButton, QLineEdit,
                            QTextEdit, QMessageBox, QFileDialog, QSpinBox,
-                           QFrame, QGridLayout, QScrollArea, QComboBox)
+                           QFrame, QGridLayout, QScrollArea, QComboBox, QDialog,
+                           QTableWidget, QTableWidgetItem, QHeaderView)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QPalette, QColor, QPixmap
+
 
 class PasswordManager:
     def __init__(self, file_path=None):
@@ -21,13 +23,16 @@ class PasswordManager:
         self.key = self.load_key()
         self.fernet = Fernet(self.key)
         self.passwords = self.load_passwords()
-        # Default categories
-        self.categories = ["1", "2", "3", "4"]
+        # Default categories with meaningful names
+        self.categories = ["Internet", "Gaming", "Coding", "Shopping", "Social", "Computer", "World"]
         if "categories" not in self.passwords:
             self.passwords["categories"] = {}
             for category in self.categories:
                 self.passwords["categories"][category] = {}
             self.save_passwords()
+        
+        # Check if migration is needed
+        self.check_and_migrate_categories()
 
     def load_key(self):
         key_path = os.path.expanduser('~/.passmanager/secret.key')
@@ -51,15 +56,61 @@ class PasswordManager:
         return {}
 
     def save_passwords(self):
-        encrypted_data = self.fernet.encrypt(json.dumps(self.passwords).encode())
+        encrypted_data = self.fernet.encrypt(json.dumps(self.passwords).encode('utf-8'))
         os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
         with open(self.file_path, 'wb') as file:
             file.write(encrypted_data)
 
-    def add_password(self, service, username, password, category="1"):
+    def check_and_migrate_categories(self):
+        """Check if categories need migration and migrate them"""
+        # Old and new categories
+        old_categories = ["1", "2", "3", "4"]
+        
+        # Check if migration is needed
+        needs_migration = False
+        for old_cat in old_categories:
+            if old_cat in self.passwords["categories"]:
+                needs_migration = True
+                break
+        
+        if needs_migration:
+            self.migrate_categories()
+    
+    def migrate_categories(self):
+        """Migrate old numeric categories to new named ones"""
+        old_categories = ["1", "2", "3", "4"]
+        new_categories = ["Internet", "Gaming", "Coding", "Shopping", "Social", "Computer", "World"]
+        
+        # First make sure all new categories exist
+        for new_cat in new_categories:
+            if new_cat not in self.passwords["categories"]:
+                self.passwords["categories"][new_cat] = {}
+        
+        # Copy data from old categories to new ones if old categories exist
+        for i, old_cat in enumerate(old_categories):
+            if old_cat in self.passwords["categories"] and i < len(new_categories):
+                new_cat = new_categories[i]
+                # Copy passwords from old category to new category
+                for service, data in self.passwords["categories"][old_cat].items():
+                    self.passwords["categories"][new_cat][service] = data
+                # Remove old category using pop to avoid KeyError if not present
+                self.passwords["categories"].pop(old_cat, None)
+        
+        self.save_passwords()
+
+    def add_password(self, service, username, password, category="Internet", tags=None):
         if category not in self.passwords["categories"]:
             self.passwords["categories"][category] = {}
-        self.passwords["categories"][category][service] = {'username': username, 'password': password}
+        
+        # Initialize tags if not provided
+        if tags is None:
+            tags = []
+        
+        self.passwords["categories"][category][service] = {
+            'username': username, 
+            'password': password,
+            'tags': tags
+        }
         self.save_passwords()
 
     def get_password(self, service, category=None):
@@ -73,17 +124,36 @@ class PasswordManager:
                     return services[service]
         return None
 
-    def update_password(self, service, username, password, category=None):
+    def update_password(self, service, username, password, category=None, tags=None):
+        # Preserve existing tags if not provided
+        existing_tags = []
+        
         if category:
             if category in self.passwords["categories"] and service in self.passwords["categories"][category]:
-                self.passwords["categories"][category][service] = {'username': username, 'password': password}
+                # Keep existing tags if not provided
+                if tags is None and 'tags' in self.passwords["categories"][category][service]:
+                    existing_tags = self.passwords["categories"][category][service]['tags']
+                
+                self.passwords["categories"][category][service] = {
+                    'username': username, 
+                    'password': password,
+                    'tags': tags if tags is not None else existing_tags
+                }
                 self.save_passwords()
                 return True
         else:
             # Search and update in all categories
             for cat, services in self.passwords["categories"].items():
                 if service in services:
-                    services[service] = {'username': username, 'password': password}
+                    # Keep existing tags if not provided
+                    if tags is None and 'tags' in services[service]:
+                        existing_tags = services[service]['tags']
+                    
+                    services[service] = {
+                        'username': username, 
+                        'password': password,
+                        'tags': tags if tags is not None else existing_tags
+                    }
                     self.save_passwords()
                     return True
         return False
@@ -103,19 +173,40 @@ class PasswordManager:
                     return True
         return False
 
-    def search_password(self, keyword, category=None):
+    def search_password(self, keyword, category=None, tag=None):
         results = {}
         if category:
             if category in self.passwords["categories"]:
                 cat_services = self.passwords["categories"][category]
-                results.update({service: creds for service, creds in cat_services.items() 
-                              if keyword.lower() in service.lower()})
+                for service, creds in cat_services.items():
+                    # Check if the keyword matches the service name
+                    keyword_match = keyword.lower() in service.lower()
+                    
+                    # Check if tag filter is applied and matches
+                    tag_match = True
+                    if tag:
+                        tag_match = False
+                        if 'tags' in creds and creds['tags']:
+                            tag_match = tag.lower() in [t.lower() for t in creds['tags']]
+                    
+                    if keyword_match and tag_match:
+                        results[service] = creds
         else:
             # Search in all categories
             for cat, services in self.passwords["categories"].items():
-                cat_results = {service: creds for service, creds in services.items() 
-                              if keyword.lower() in service.lower()}
-                results.update(cat_results)
+                for service, creds in services.items():
+                    # Check if the keyword matches the service name
+                    keyword_match = keyword.lower() in service.lower()
+                    
+                    # Check if tag filter is applied and matches
+                    tag_match = True
+                    if tag:
+                        tag_match = False
+                        if 'tags' in creds and creds['tags']:
+                            tag_match = tag.lower() in [t.lower() for t in creds['tags']]
+                    
+                    if keyword_match and tag_match:
+                        results[service] = creds
         return results
 
     def get_categories(self):
@@ -168,60 +259,80 @@ class PasswordManagerGUI(QMainWindow):
         
     def setup_ui(self):
         self.setWindowTitle("Securonis Password Manager")
-        self.setGeometry(100, 100, 600, 250)
+        self.setGeometry(100, 100, 700, 500)
         
-
+        # Set application-wide style to eliminate white spaces
+        app = QApplication.instance()
+        app.setStyleSheet("""
+            QMainWindow, QDialog, QWidget {
+                background-color: #1a1a1a;
+                color: white;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #1a1a1a;
+                width: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #3d3d3d;
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar:horizontal {
+                border: none;
+                background: #1a1a1a;
+                height: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #3d3d3d;
+                min-width: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+        """)
+        
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
+        main_layout = QHBoxLayout(central_widget)
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(0, 0, 0, 0)
         
-
-        top_panel = QWidget()
-        top_panel.setStyleSheet("""
+        # Left sidebar for buttons
+        sidebar = QWidget()
+        sidebar.setFixedWidth(180)
+        sidebar.setStyleSheet("""
             QWidget {
                 background-color: #1a1a1a;
-                border-radius: 0px;
-                padding: 0px;
-                margin: 0px;
+                border-right: 1px solid #333333;
             }
         """)
-        top_layout = QVBoxLayout(top_panel)
-        top_layout.setSpacing(1)
-        top_layout.setContentsMargins(1, 1, 1, 1)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setSpacing(8)
+        sidebar_layout.setContentsMargins(10, 20, 10, 20)
         
-
-        first_row = QHBoxLayout()
-        first_row.setSpacing(2)
-        first_row.setContentsMargins(0, 0, 0, 0)
-        
-
-        second_row = QHBoxLayout()
-        second_row.setSpacing(2)
-        second_row.setContentsMargins(0, 0, 0, 0)
-        
-
-        third_row = QHBoxLayout()
-        third_row.setSpacing(2)
-        third_row.setContentsMargins(0, 0, 0, 0)
-        
-
+        # Modern button style
         button_style = """
             QPushButton {
                 background-color: #2d2d2d;
                 color: white;
                 border: none;
-                padding: 3px 5px;
+                padding: 10px;
                 border-radius: 5px;
                 font-weight: bold;
                 font-size: 12px;
-                min-width: 120px;
-                margin: 1px;
+                text-align: left;
+                margin: 2px 0px;
             }
             QPushButton:hover {
                 background-color: #3d3d3d;
-                border: 1px solid #42d4d4;
+                border-left: 3px solid #42d4d4;
                 color: #42d4d4;
             }
             QPushButton:pressed {
@@ -232,70 +343,62 @@ class PasswordManagerGUI(QMainWindow):
                 color: #666666;
             }
         """
-
+        
+        # No title for sidebar as requested
+        
+        
         menu_buttons = [
             ("Add Password", self.show_add_password),
             ("Get Password", self.show_get_password),
             ("Update Password", self.show_update_password),
             ("Delete Password", self.show_delete_password),
             ("Search Passwords", self.show_search_password),
-            ("Import CSV", self.import_passwords),
-            ("Export CSV", self.export_passwords),
+            ("Security", self.show_security_check),
             ("Generate Password", self.show_generate_password),
-            ("Show All Passwords", self.show_all_passwords)
+            ("Show All Passwords", self.show_all_passwords),
+            ("Import CSV", self.import_passwords),
+            ("Export CSV", self.export_passwords)
         ]
 
-        for text, callback in menu_buttons[:4]:
+        # Add buttons vertically in the sidebar
+        for text, callback in menu_buttons:
             btn = QPushButton(text)
             btn.setStyleSheet(button_style)
             btn.setCursor(Qt.PointingHandCursor)
             btn.clicked.connect(callback)
-            first_row.addWidget(btn)
+            sidebar_layout.addWidget(btn)
         
-
-        for text, callback in menu_buttons[4:8]:
-            btn = QPushButton(text)
-            btn.setStyleSheet(button_style)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(callback)
-            second_row.addWidget(btn)
-            
-        # Add Show All Passwords button in the third row
-        show_all_btn = QPushButton(menu_buttons[8][0])
-        show_all_btn.setStyleSheet(button_style)
-        show_all_btn.setCursor(Qt.PointingHandCursor)
-        show_all_btn.clicked.connect(menu_buttons[8][1])
-        third_row.addWidget(show_all_btn)
+        # Add spacer at the bottom of sidebar
+        sidebar_layout.addStretch()
         
-        top_layout.addLayout(first_row)
-        top_layout.addLayout(second_row)
-        top_layout.addLayout(third_row)
-        main_layout.addWidget(top_panel)
+        # Add sidebar to main layout
+        main_layout.addWidget(sidebar)
 
         self.output_text = QTextEdit()
         self.output_text.setReadOnly(True)
-        self.output_text.setMaximumHeight(150)
+        self.output_text.setMinimumHeight(250)
         self.output_text.setStyleSheet("""
             QTextEdit {
                 background-color: #2d2d2d;
                 color: white;
                 border: 1px solid #3d3d3d;
-                border-radius: 0px;
-                padding: 5px;
+                border-radius: 5px;
+                padding: 10px;
                 font-family: 'Consolas', monospace;
-                font-size: 11px;
-                line-height: 1.4;
+                font-size: 12px;
+                line-height: 1.5;
+                margin-top: 15px;
             }
             QScrollBar:vertical {
                 border: none;
                 background-color: #2d2d2d;
-                width: 6px;
+                width: 8px;
                 margin: 0px;
             }
             QScrollBar::handle:vertical {
                 background-color: #42d4d4;
-                border-radius: 2px;
-                min-height: 15px;
+                border-radius: 4px;
+                min-height: 20px;
             }
             QScrollBar::handle:vertical:hover {
                 background-color: #3d3d3d;
@@ -305,7 +408,34 @@ class PasswordManagerGUI(QMainWindow):
                 height: 0px;
             }
         """)
-        main_layout.addWidget(self.output_text)
+        
+        # Content area
+        content_area = QWidget()
+        content_layout = QVBoxLayout(content_area)
+        content_layout.setContentsMargins(15, 15, 15, 15)
+        
+        # Welcome message
+        welcome_label = QLabel("Welcome to Securonis Password Manager")
+        welcome_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+                margin-bottom: 10px;
+            }
+        """)
+        content_layout.addWidget(welcome_label)
+        
+        # Instructions
+        instructions = QLabel("Select an option from the menu on the left to manage your passwords.")
+        instructions.setStyleSheet("color: #cccccc; font-size: 12px;")
+        content_layout.addWidget(instructions)
+        
+        # Output text area
+        content_layout.addWidget(self.output_text)
+        
+        # Add content area to main layout
+        main_layout.addWidget(content_area)
         
         self.set_dark_theme()
         
@@ -325,7 +455,7 @@ class PasswordManagerGUI(QMainWindow):
     def show_add_password(self):
         dialog = QWidget()
         dialog.setWindowTitle("Add Password")
-        dialog.setGeometry(200, 200, 400, 280)
+        dialog.setGeometry(200, 200, 400, 330)  # Increased height for tags
         dialog.setStyleSheet("""
             QWidget {
                 background-color: #1a1a1a;
@@ -396,6 +526,11 @@ class PasswordManagerGUI(QMainWindow):
         password_input.setPlaceholderText("Enter password")
         password_input.setEchoMode(QLineEdit.Password)
         
+        # Add tags field
+        tags_label = QLabel("Tags (comma separated):")
+        tags_input = QLineEdit()
+        tags_input.setPlaceholderText("e.g., work, personal, important")
+        
         layout.addWidget(category_label)
         layout.addWidget(category_combo)
         layout.addWidget(service_label)
@@ -404,6 +539,8 @@ class PasswordManagerGUI(QMainWindow):
         layout.addWidget(username_input)
         layout.addWidget(password_label)
         layout.addWidget(password_input)
+        layout.addWidget(tags_label)
+        layout.addWidget(tags_input)
         
         button_layout = QHBoxLayout()
         save_btn = QPushButton("Save")
@@ -414,6 +551,7 @@ class PasswordManagerGUI(QMainWindow):
             username_input.text(),
             password_input.text(),
             category_combo.currentText(),
+            tags_input.text(),
             dialog
         ))
         cancel_btn.clicked.connect(dialog.close)
@@ -424,19 +562,30 @@ class PasswordManagerGUI(QMainWindow):
         
         dialog.show()
         
-    def add_password(self, service, username, password, category, dialog):
+    def add_password(self, service, username, password, category, tags, dialog):
         if not all([service, username, password]):
             QMessageBox.warning(dialog, "Error", "Please fill all fields!")
             return
-            
-        self.password_manager.add_password(service, username, password, category)
-        self.output_text.setText(f"Password added for service: {service} (Category: {category})")
+        
+        # Process tags - split by comma and strip whitespace
+        tag_list = []
+        if tags:
+            tag_list = [tag.strip() for tag in tags.split(',') if tag.strip()]
+        
+        self.password_manager.add_password(service, username, password, category, tag_list)
+        
+        # Show confirmation with tags if any were added
+        if tag_list:
+            self.output_text.setText(f"Password added for service: {service} (Category: {category}, Tags: {', '.join(tag_list)})")
+        else:
+            self.output_text.setText(f"Password added for service: {service} (Category: {category})")
+        
         dialog.close()
         
     def show_get_password(self):
         dialog = QWidget()
         dialog.setWindowTitle("Get Password")
-        dialog.setGeometry(200, 200, 300, 140)
+        dialog.setGeometry(200, 200, 400, 200)
         dialog.setStyleSheet("""
             QWidget {
                 background-color: #1a1a1a;
@@ -494,10 +643,17 @@ class PasswordManagerGUI(QMainWindow):
         service_input = QLineEdit()
         service_input.setPlaceholderText("Enter service name")
         
+        # Add tag filter
+        tag_label = QLabel("Filter by tag (optional):")
+        tag_input = QLineEdit()
+        tag_input.setPlaceholderText("Enter tag to filter by")
+        
         layout.addWidget(category_label)
         layout.addWidget(category_combo)
         layout.addWidget(service_label)
         layout.addWidget(service_input)
+        layout.addWidget(tag_label)
+        layout.addWidget(tag_input)
         
         button_layout = QHBoxLayout()
         get_btn = QPushButton("Get")
@@ -506,6 +662,7 @@ class PasswordManagerGUI(QMainWindow):
         get_btn.clicked.connect(lambda: self.get_password(
             service_input.text(), 
             None if category_combo.currentText() == "All Categories" else category_combo.currentText(),
+            tag_input.text(),
             dialog
         ))
         cancel_btn.clicked.connect(dialog.close)
@@ -515,23 +672,60 @@ class PasswordManagerGUI(QMainWindow):
         layout.addLayout(button_layout)
         
         dialog.show()
-        
-    def get_password(self, service, category, dialog):
+
+    def get_password(self, service, category, tag, dialog):
         if not service:
             QMessageBox.warning(dialog, "Error", "Please enter service name!")
             return
-            
-        password_info = self.password_manager.get_password(service, category)
-        if password_info:
-            self.output_text.setText(f"Service: {service}\nUsername: {password_info['username']}\nPassword: {password_info['password']}")
-        else:
-            self.output_text.setText("Service not found.")
-        dialog.close()
         
+        # First try to get the exact password by service name
+        password_info = self.password_manager.get_password(service, category)
+        
+        # If found and tag is specified, check if it has the tag
+        if password_info and tag:
+            if 'tags' not in password_info or tag.lower() not in [t.lower() for t in password_info['tags']]:
+                password_info = None  # Reset if tag doesn't match
+        
+        if password_info:
+            # Display tags if they exist
+            tags_str = ""
+            if 'tags' in password_info and password_info['tags']:
+                tags_str = f"\nTags: {', '.join(password_info['tags'])}"
+            
+            self.output_text.setText(f"Service: {service}\nUsername: {password_info['username']}\nPassword: {password_info['password']}{tags_str}")
+        else:
+            # If not found by exact match, try searching
+            results = self.password_manager.search_password(service, category, tag)
+            if results:
+                if len(results) == 1:
+                    # If only one result, show it directly
+                    service_name = list(results.keys())[0]
+                    password_info = results[service_name]
+                    
+                    # Display tags if they exist
+                    tags_str = ""
+                    if 'tags' in password_info and password_info['tags']:
+                        tags_str = f"\nTags: {', '.join(password_info['tags'])}"
+                    
+                    self.output_text.setText(f"Service: {service_name}\nUsername: {password_info['username']}\nPassword: {password_info['password']}{tags_str}")
+                else:
+                    # Multiple results, show a list
+                    output = "Multiple matches found:\n\n"
+                    for service_name, info in results.items():
+                        tags_str = ""
+                        if 'tags' in info and info['tags']:
+                            tags_str = f" [Tags: {', '.join(info['tags'])}]"
+                        output += f"Service: {service_name}{tags_str}\n"
+                    self.output_text.setText(output)
+            else:
+                self.output_text.setText("No matching services found.")
+        
+        dialog.close()
+
     def show_update_password(self):
         dialog = QWidget()
         dialog.setWindowTitle("Update Password")
-        dialog.setGeometry(200, 200, 300, 240)
+        dialog.setGeometry(200, 200, 400, 300)
         dialog.setStyleSheet("""
             QWidget {
                 background-color: #1a1a1a;
@@ -598,6 +792,11 @@ class PasswordManagerGUI(QMainWindow):
         password_input.setPlaceholderText("Enter new password")
         password_input.setEchoMode(QLineEdit.Password)
         
+        # Add tags field
+        tags_label = QLabel("Tags (comma separated):")
+        tags_input = QLineEdit()
+        tags_input.setPlaceholderText("e.g., work, personal, important")
+        
         layout.addWidget(category_label)
         layout.addWidget(category_combo)
         layout.addWidget(service_label)
@@ -606,8 +805,122 @@ class PasswordManagerGUI(QMainWindow):
         layout.addWidget(username_input)
         layout.addWidget(password_label)
         layout.addWidget(password_input)
+        layout.addWidget(tags_label)
+        layout.addWidget(tags_input)
         
         button_layout = QHBoxLayout()
+        update_btn = QPushButton("Update")
+        cancel_btn = QPushButton("Cancel")
+        
+        update_btn.clicked.connect(lambda: self.update_password(
+            service_input.text(),
+            username_input.text(),
+            password_input.text(),
+            None if category_combo.currentText() == "All Categories" else category_combo.currentText(),
+            tags_input.text(),
+            dialog
+        ))
+        cancel_btn.clicked.connect(dialog.close)
+        
+        button_layout.addWidget(update_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+        
+        dialog.show()
+
+    def update_password(self, service, username, password, category, tags, dialog):
+        if not all([service, username, password]):
+            QMessageBox.warning(dialog, "Error", "Please fill all fields!")
+            return
+        
+        # Process tags - split by comma and strip whitespace
+        tag_list = []
+        if tags:
+            tag_list = [tag.strip() for tag in tags.split(',') if tag.strip()]
+        
+        # Update the password with tags
+        success = self.password_manager.update_password(service, username, password, category, tag_list)
+    
+        if success:
+            # Show confirmation with tags if any were added
+            if tag_list:
+                self.output_text.setText(f"Password updated for service: {service} (Category: {category if category else 'found'}, Tags: {', '.join(tag_list)})")
+            else:
+                self.output_text.setText(f"Password updated for service: {service} (Category: {category if category else 'found'})")
+            dialog.close()
+        else:
+            QMessageBox.warning(dialog, "Error", f"Service '{service}' not found in the selected category!")
+        
+    # This method was removed as it's a duplicate
+        
+    def show_update_password(self):
+        dialog = QWidget()
+        dialog.setWindowTitle("Update Password")
+        dialog.setGeometry(200, 200, 300, 240)
+        dialog.setStyleSheet("""
+            QWidget {
+                background-color: #1a1a1a;
+            }
+            QLabel {
+                color: white;
+                font-size: 11px;
+            }
+            QLineEdit, QComboBox {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #3d3d3d;
+                border-radius: 3px;
+                padding: 4px;
+                font-size: 11px;
+            }
+            QLineEdit:focus, QComboBox:focus {
+                border: 1px solid #42d4d4;
+            }
+            QPushButton {
+                background-color: #2d2d2d;
+                color: white;
+                border: none;
+                padding: 5px;
+                border-radius: 3px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #3d3d3d;
+                border: 1px solid #42d4d4;
+                color: #42d4d4;
+            }
+            QComboBox::drop-down {
+                border: 0px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: white;
+                selection-background-color: #3d3d3d;
+                selection-color: #42d4d4;
+            }
+        """)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(5)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        category_label = QLabel("Category (optional):")
+        category_combo = QComboBox()
+        category_combo.addItem("All Categories")
+        for category in self.password_manager.get_categories():
+            category_combo.addItem(category)
+        
+        service_label = QLabel("Service Name:")
+        service_input = QLineEdit()
+        service_input.setPlaceholderText("Enter service name")
+        
+        username_label = QLabel("New Username:")
+        
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        
+        return card
+
         update_btn = QPushButton("Update")
         cancel_btn = QPushButton("Cancel")
         
@@ -625,17 +938,6 @@ class PasswordManagerGUI(QMainWindow):
         layout.addLayout(button_layout)
         
         dialog.show()
-        
-    def update_password(self, service, username, password, category, dialog):
-        if not all([service, username, password]):
-            QMessageBox.warning(dialog, "Error", "Please fill all fields!")
-            return
-            
-        if self.password_manager.update_password(service, username, password, category):
-            self.output_text.setText(f"Password updated for service: {service}")
-        else:
-            self.output_text.setText("Service not found.")
-        dialog.close()
         
     def show_delete_password(self):
         dialog = QWidget()
@@ -953,6 +1255,214 @@ class PasswordManagerGUI(QMainWindow):
             output += "No passwords stored."
         
         self.output_text.setText(output)
+    
+    def check_password_strength(self, password):
+        """Evaluate the strength of a password"""
+        score = 0
+        feedback = []
+        
+        # Check length
+        if len(password) < 8:
+            feedback.append("Password is too short (minimum 8 characters)")
+        elif len(password) >= 12:
+            score += 25
+        else:
+            score += 10
+        
+        # Check for uppercase letters
+        if any(c.isupper() for c in password):
+            score += 10
+        else:
+            feedback.append("Add uppercase letters")
+        
+        # Check for lowercase letters
+        if any(c.islower() for c in password):
+            score += 10
+        else:
+            feedback.append("Add lowercase letters")
+        
+        # Check for digits
+        if any(c.isdigit() for c in password):
+            score += 10
+        else:
+            feedback.append("Add numbers")
+        
+        # Check for special characters
+        if any(not c.isalnum() for c in password):
+            score += 15
+        else:
+            feedback.append("Add special characters")
+        
+        # Check for common patterns
+        common_patterns = ['123456', 'password', 'qwerty', 'admin']
+        if any(pattern in password.lower() for pattern in common_patterns):
+            score -= 20
+            feedback.append("Avoid common patterns")
+        
+        # Determine strength category and color
+        if score < 30:
+            strength = "Weak"
+            color = "#FF0000"  # Red
+        elif score < 50:
+            strength = "Moderate"
+            color = "#FFA500"  # Orange
+        elif score < 70:
+            strength = "Strong"
+            color = "#FFFF00"  # Yellow
+        else:
+            strength = "Very Strong"
+            color = "#00FF00"  # Green
+        
+        # Prepare feedback message
+        if feedback:
+            feedback_msg = f"{strength} - {', '.join(feedback)}"
+        else:
+            feedback_msg = strength
+        
+        return score, feedback_msg, color
+    
+
+    
+    def show_security_check(self):
+        """Show a separate security check dialog window"""
+        # Create a proper dialog window
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Password Security Check")
+        dialog.setFixedSize(450, 400)
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #1a1a1a;
+            }
+            QLabel {
+                color: white;
+            }
+            QLineEdit {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QPushButton {
+                background-color: #2d2d2d;
+                color: white;
+                border: none;
+                padding: 8px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #3d3d3d;
+                border: 1px solid #42d4d4;
+                color: #42d4d4;
+            }
+        """)
+        
+        # Main layout
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Title
+        title_label = QLabel("Password Security Checker")
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: white; margin-bottom: 10px;")
+        layout.addWidget(title_label)
+        
+        # Instructions
+        instructions = QLabel("Enter a password below to check its security strength")
+        layout.addWidget(instructions)
+        
+        # Password input
+        password_input = QLineEdit()
+        password_input.setPlaceholderText("Enter password to check")
+        password_input.setEchoMode(QLineEdit.Password)
+        layout.addWidget(password_input)
+        
+        # Show/Hide button
+        show_hide_btn = QPushButton("Show Password")
+        layout.addWidget(show_hide_btn)
+        
+        # Strength meter label
+        meter_label = QLabel("Password Strength:")
+        layout.addWidget(meter_label)
+        
+        # Strength meter container
+        meter_container = QFrame()
+        meter_container.setStyleSheet("background-color: #2d2d2d; border-radius: 4px;")
+        meter_container.setFixedHeight(20)
+        meter_layout = QHBoxLayout(meter_container)
+        meter_layout.setContentsMargins(2, 2, 2, 2)
+        meter_layout.setSpacing(0)
+        
+        # Strength bar
+        strength_bar = QFrame()
+        strength_bar.setFixedWidth(0)  # Initially empty
+        strength_bar.setStyleSheet("background-color: #666; border-radius: 2px;")
+        meter_layout.addWidget(strength_bar)
+        meter_layout.addStretch()
+        
+        layout.addWidget(meter_container)
+        
+        # Results area
+        result_label = QLabel("Results will appear here")
+        result_label.setWordWrap(True)
+        result_label.setStyleSheet("""
+            background-color: #2d2d2d;
+            color: white;
+            padding: 15px;
+            border-radius: 4px;
+            min-height: 80px;
+        """)
+        layout.addWidget(result_label)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        check_btn = QPushButton("Check Strength")
+        close_btn = QPushButton("Close")
+        
+        button_layout.addWidget(check_btn)
+        button_layout.addWidget(close_btn)
+        layout.addLayout(button_layout)
+        
+        # Functions
+        def toggle_password_visibility():
+            if password_input.echoMode() == QLineEdit.Password:
+                password_input.setEchoMode(QLineEdit.Normal)
+                show_hide_btn.setText("Hide Password")
+            else:
+                password_input.setEchoMode(QLineEdit.Password)
+                show_hide_btn.setText("Show Password")
+        
+        def check_security():
+            password = password_input.text()
+            if not password:
+                result_label.setText("Please enter a password to check")
+                return
+            
+            # Get password strength
+            score, feedback, color = self.check_password_strength(password)
+            
+            # Update result text
+            result_label.setText(feedback)
+            result_label.setStyleSheet(f"""
+                background-color: #2d2d2d;
+                color: {color};
+                padding: 15px;
+                border-radius: 4px;
+                min-height: 80px;
+            """)
+            
+            # Update strength bar
+            bar_width = int((meter_container.width() - 4) * score / 100)
+            strength_bar.setFixedWidth(max(bar_width, 4))  # At least 4px wide
+            strength_bar.setStyleSheet(f"background-color: {color}; border-radius: 2px;")
+        
+        # Connect signals
+        show_hide_btn.clicked.connect(toggle_password_visibility)
+        check_btn.clicked.connect(check_security)
+        close_btn.clicked.connect(dialog.accept)
+        
+        # Show the dialog
+        dialog.exec_()
 
 def main():
     app = QApplication(sys.argv)
